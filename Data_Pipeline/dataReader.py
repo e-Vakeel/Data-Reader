@@ -1,41 +1,31 @@
+from abc import ABC, abstractmethod
+from typing import List, Dict, Union, Any
 import csv
 import json
-import yaml
 from pathlib import Path
-from typing import List, Dict, Any, Union
-import random
-from transformers import AutoTokenizer
 
-class BaseReader:
-    def read(self, file_path: str) -> List[str]:
-        raise NotImplementedError
+class BaseReader(ABC):
+    @abstractmethod
+    def read(self, file_path: str) -> List[Union[str, Dict[str, Any]]]:
+        pass
 
 class CSVReader(BaseReader):
-    def read(self, file_path: str) -> List[str]:
+    def read(self, file_path: str) -> List[Dict[str, Any]]:
         with open(file_path, 'r', newline='', encoding='utf-8') as file:
-            reader = csv.reader(file)
-            # Assuming the text is in the first column. Adjust if needed.
-            return [row[0] for row in reader]
+            reader = csv.DictReader(file)
+            return list(reader)
 
 class JSONReader(BaseReader):
-    def read(self, file_path: str) -> List[str]:
+    def read(self, file_path: str) -> List[Dict[str, Any]]:
         with open(file_path, 'r', encoding='utf-8') as file:
             data = json.load(file)
-            # Assuming the JSON structure has a 'text' field. Adjust if needed.
-            return [item for item in data]
+            return data if isinstance(data, list) else [data]
 
 class TextReader(BaseReader):
     def read(self, file_path: str) -> List[str]:
         with open(file_path, 'r', encoding='utf-8') as file:
-            # Assuming each line is a separate text. Adjust if needed.
             return file.readlines()
-
-class YAMLReader(BaseReader):
-    def read(self, file_path: str) -> List[str]:
-        with open(file_path , 'r', encoding='utf-8') as file:
-            data = yaml.safe_load(file)
-            # Assuming the YAML structure has a 'text' field. Adjust if needed.
-            return [item['text'] for item in data]
+        
 
 class UnifiedReader:
     def __init__(self):
@@ -45,34 +35,47 @@ class UnifiedReader:
             '.txt': TextReader()
         }
 
-    def read_file(self, file_path: str) -> List[str]:
+    def read_file(self, file_path: str) -> List[Dict[str, Any]]:
         ext = Path(file_path).suffix
         if ext not in self.readers:
             raise ValueError(f"Unsupported file type: {ext}")
-        return self.readers[ext].read(file_path)
+        
+        raw_data = self.readers[ext].read(file_path)
+        
+        # Normalize the data structure
+        normalized_data = []
+        for item in raw_data:
+            if isinstance(item, str):
+                normalized_data.append({'text': item.strip(), 'file': file_path})
+            elif isinstance(item, dict):
+                item['file'] = file_path
+                normalized_data.append(item)
+            else:
+                raise ValueError(f"Unexpected data type: {type(item)}")
+        
+        return normalized_data
 
-    def read_directory(self, dir_path: str) -> List[str]:
-        all_texts = []
+    def read_directory(self, dir_path: str) -> List[Dict[str, Any]]:
+        all_data = []
         for file_path in Path(dir_path).rglob('*'):
             if file_path.suffix in self.readers:
-                all_texts.extend(self.read_file(str(file_path)))
-        return all_texts
+                all_data.extend(self.read_file(str(file_path)))
+        return all_data
+    
+from transformers import AutoTokenizer
 
 class LLMDataPreparer:
     def __init__(self, model_name: str, max_length: int = 512):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.max_length = max_length
 
-    def prepare_data(self, texts: Union[List[str], List[List[str]]]) -> List[Dict[str, Any]]:
+    def prepare_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         prepared_data = []
-        for text in texts:
-            # If text is a list, join it into a single string
-            if isinstance(text, list):
-                text = ' '.join(text)
-            
-            # Ensure text is a string
+        for item in data:
+            # Assume 'text' is the key for the main content, adjust if needed
+            text = item.get('text', '')
             if not isinstance(text, str):
-                raise ValueError(f"Expected string or list of strings, got {type(text)}")
+                text = str(text)  # Convert to string if it's not
 
             encoded = self.tokenizer.encode_plus(
                 text,
@@ -82,28 +85,40 @@ class LLMDataPreparer:
                 truncation=True,
                 return_attention_mask=True
             )
-            prepared_data.append({
+            prepared_item = {
                 'input_ids': encoded['input_ids'],
-                'attention_mask': encoded['attention_mask']
-            })
+                'attention_mask': encoded['attention_mask'],
+                'file': item.get('file', ''),  # Include source file information
+            }
+            # Include any other metadata from the original item
+            prepared_item.update({k: v for k, v in item.items() if k not in prepared_item})
+            prepared_data.append(prepared_item)
         return prepared_data
-
-
+    
+    def parser(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        prepared_data = []
+        for item in data:
+            # Assume 'text' is the key for the main content, adjust if needed
+            text = item.get('text', '')
+            if not isinstance(text, str):
+                text = str(text)
 
 def main():
     reader = UnifiedReader()
     data_dir = 'data'
-    all_texts = reader.read_directory(data_dir)
-    print(f"Total number of texts: {len(all_texts)}")
-    print(f"Total number of texts: {all_texts}")
-    # Shuffle the data
-    flattened_texts = [item for sublist in all_texts for item in (sublist if isinstance(sublist, list) else [sublist])]
+    all_data = reader.read_directory(data_dir)
+    
+    print("Total number of items:", len(all_data))
+    print("Sample items:")
+    for i in range(min(3, len(all_data))):
+        print(f"Item {i + 1}:", all_data[i])
     
     preparer = LLMDataPreparer('bert-base-uncased')
-    prepared_data = preparer.prepare_data(flattened_texts)
+    prepared_data = preparer.prepare_data(all_data)
     
-    print(f"Total number of samples: {len(prepared_data)}")
-    print(f"Sample data point: {prepared_data[0]}")
+    print(f"\nTotal number of prepared samples: {len(prepared_data)}")
+    print(f"Sample prepared data point:")
+    print(prepared_data)
 
 if __name__ == "__main__":
     main()

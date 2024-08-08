@@ -18,8 +18,9 @@ data_dir = 'data'
 
 dataset = LargeDataset(data_dir, 'bert-base-uncased')
 dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+print(dataloader)
 
 # Now you can iterate over dataloader in your training loop
 for batch in dataloader:
-    # Your training code here
+
     pass
